@@ -317,13 +317,13 @@ class SQL():
         reply['update'] = self._sh.now() + datetime.timedelta(seconds=int(step / 1000))
         where = " from num WHERE _item='{0}' AND _start + _dur >= {1} AND _start <= {2} GROUP by CAST((_start / {3}) AS INTEGER)".format(item, istart, iend, step)
         if func == 'avg':
-            query = "SELECT MIN(_start), ROUND(SUM(_avg * _dur) / SUM(_dur), 2)" + where + " ORDER BY _start ASC"
+            query = "SELECT MIN(_start), ROUND(SUM(_avg * _dur) / SUM(_dur), 3)" + where + " ORDER BY _start ASC"
         elif func == 'min':
             query = "SELECT MIN(_start), MIN(_min)" + where
         elif func == 'max':
             query = "SELECT MIN(_start), MAX(_max)" + where
         elif func == 'on':
-            query = "SELECT MIN(_start), ROUND(SUM(_on * _dur) / SUM(_dur), 2)" + where + " ORDER BY _start ASC"
+            query = "SELECT MIN(_start), ROUND(SUM(_on * _dur) / SUM(_dur), 3)" + where + " ORDER BY _start ASC"
         else:
             raise NotImplementedError
         _item = self._sh.return_item(item)
@@ -355,13 +355,13 @@ class SQL():
         end = self._get_timestamp(end)
         where = " from num WHERE _item='{0}' AND _start + _dur >= {1} AND _start <= {2};".format(item, start, end)
         if func == 'avg':
-            query = "SELECT ROUND(SUM(_avg * _dur) / SUM(_dur), 2)" + where
+            query = "SELECT ROUND(SUM(_avg * _dur) / SUM(_dur), 3), MIN(_start), SUM(_dur)" + where
         elif func == 'min':
             query = "SELECT MIN(_min)" + where
         elif func == 'max':
             query = "SELECT MAX(_max)" + where
         elif func == 'on':
-            query = "SELECT ROUND(SUM(_on * _dur) / SUM(_dur), 2)" + where
+            query = "SELECT ROUND(SUM(_on * _dur) / SUM(_dur), 3), MIN(_start), SUM(_dur)" + where
         else:
             logger.warning("Unknown export function: {0}".format(func))
             return
@@ -372,6 +372,26 @@ class SQL():
         _item = self._sh.return_item(item)
         _item_change = self._timestamp(_item.last_change())
         if tuples:
+            value = tuples[0][0]
+            delta = end - start
+            delta1 = _item_change - start
+            delta2 = end - _item_change
+            sdelta1 = 0
+            svalue = 0
+            if func == 'avg' or func == 'on':
+                vstart = tuples[0][1]
+                vdelta = tuples[0][2]
+                # correct for the length of the first duration
+                squery = "SELECT _{0}, _start, _dur from num WHERE _item='{1}' AND _start + _dur > {2} AND _start <= {2} LIMIT 1;".format(func, item, start)
+                stuples = self._fetchall(squery)
+                if stuples:
+                    svalue = stuples[0][0]
+                    sstart = stuples[0][1]
+                    sdelta = stuples[0][2]
+                    sdelta1 = start - sstart
+                    sdelta2 = sstart + sdelta - start
+                else:
+                    logger.warning("no values in sql database for start time: {} (query: {})".format(start, squery))
             if _item_change < end:
                 _value = float(_item())
                 if tuples[0][0] is None:
@@ -380,21 +400,43 @@ class SQL():
                     else:
                         return _value
                 else:
-                    value = tuples[0][0]
-                    delta = end - start
-                    delta1 = _item_change - start
-                    delta2 = end - _item_change
-                    if func == 'avg':
-                        return round((delta1 * value + delta2 * _value) / delta, 2)
-                    elif func == 'min':
-                        return min(value, _value)
-                    elif func == 'max':
-                        return max(value, _value)
-                    elif func == 'on':
-                        return round((delta1 * value + delta2 * int(bool(_value))) / delta, 2)
+                    try:
+                        if func == 'avg':
+                            return round((value * vdelta - sdelta1 * svalue + delta2 * _value) / delta, 3)
+                        elif func == 'min':
+                            return min(value, _value)
+                        elif func == 'max':
+                            return max(value, _value)
+                        elif func == 'on':
+                            return round((value * vdelta - sdelta1 * svalue + delta2 * int(bool(_value))) / delta, 3)
+                    except Exception as e:
+                        logger.warning("could not evaluate sql query: {}, exception:{}".format(query, e))
+                        return
             else:
-                return tuples[0][0]
+                if func == 'avg' or func == 'on':
+                    # correct for the length of the last duration
+                    equery = "SELECT _{0}, _start, _dur from num WHERE _item='{1}' AND _start + _dur > {2} AND _start <= {2} LIMIT 1;".format(func, item, end)
+                    etuples = self._fetchall(equery)
+                    if etuples:
+                        evalue = etuples[0][0]
+                        estart = etuples[0][1]
+                        edelta = etuples[0][2]
+                        edelta1 = end - estart
+                        edelta2 = estart + edelta - end
+                        try:
+                            if func == 'avg':
+                                return round((value * vdelta - sdelta1 * svalue - edelta2 * evalue) / delta, 3)
+                            else: 
+                                return round((value * vdelta - sdelta1 * svalue - edelta2 * evalue) / delta ,3)
+                        except Exception as e:
+                            logger.warning("could not evaluate sql query: {}, exception:{}".format(query, e))
+                            return
+                    else:
+                        logger.warning("no values in sql database for end time: {} (query: {})".format(end, equery))
+                else:
+                    return tuples[0][0]
         elif _item_change < end:
+            logger.debug("sql did NOT return tuples, _item_change < end")
             _value = float(_item())
             if func == 'on':
                 return int(bool(_value))
